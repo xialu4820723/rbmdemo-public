@@ -1,52 +1,41 @@
-# RoaringBitmap 性能分析报告
+# Recall filter: three-way benchmark
 
-## 概述
-本报告基于 results.csv 中的数据生成，展示了在不同数据分布场景下，1000个RoaringBitmap执行AND操作的性能表现。
+Run command (from the repository root):
 
-## 测试环境
-- Bitmap数量: 1000个
-- 每个bitmap目标基数: 700,000；
-  - 每个bitmap塞多少个数字，由于有重复值，实际塞入的数会比这个少
-- 数值范围: 0 - 1,000,000
+```sh
+mvn test dependency:build-classpath -Dmdep.outputFile=target/classpath.txt
+java -cp "target/classes:$(cat target/classpath.txt)" com.example.rbmdemo.PerfAnalysis
+```
 
-## 性能测试结果
+`results.csv` is the authoritative input for result screenshots and contains all measured rows.
 
-| 场景名称 | 平均耗时 | 最小耗时 | 最大耗时 | 结果基数 | 有值Bitmap数 | 平均基数 |
-|---------|---------|---------|---------|---------|------------|---------|
-| 多数bitmap有值 | 953.33 μs | 884.13 μs | 1024.46 μs | 0 | 1000/1000 | 503408 |
-| 多数bitmap为空 | 365.31 μs | 348.50 μs | 393.79 μs | 0 | 100/1000 | 503415 |
-| 混合情况 | 218.95 μs | 211.46 μs | 236.79 μs | 0 | 660/1000 | 285513 |
-| 所有相同数据 | 37728.31 μs | 37014.13 μs | 39433.17 μs | 503403 | 1000/1000 | 503403 |
-| 所有bitmap都为空 | 63.52 μs | 50.54 μs | 109.46 μs | 0 | 0/1000 | 0 |
-| 所有bitmap都包含所有值 | 967.75 μs | 396.08 μs | 2359.00 μs | 1000000 | 1000/1000 | 1000000 |
-| 范围不同 | 10455.11 μs | 10010.92 μs | 11210.50 μs | 0 | 1000/1000 | 455350 |
+## Measurement scope
 
-## 性能排名 (按平均耗时从快到慢)
+- Synthetic data: 5,000,000-ID universe, eight conditions, and either 50,000 or 500,000 candidates. All methods within each scenario use the same inputs.
+- `short_circuit_scan`: visit candidate IDs ascending, check conditions in order, stop at first miss.
+- `flat_word_and`: scan all words in equal-capacity `long[]` indexes, stop processing each word once it is zero, and enumerate set bits.
+- `roaring_and`: prebuilt RoaringBitmap candidate and condition indexes, cloned candidate then intersected with each condition.
+- Index and candidate preparation are excluded. Timed interval includes filtering and ascending result-ID array creation; equality checks are outside the timed interval.
+- 40 warmups and 31 measurements per method and scenario, with rotating start order during measurement. Median and min/max are reported.
+- Localized candidates occupy one 16-bit bucket; the dispersed workloads span the ID universe and add dense non-candidate postings. The first 10% of candidates match all conditions; every other candidate fails exactly one.
 
-| 排名 | 场景名称 | 平均耗时 |
-|-----|---------|---------|
-| 1 | 所有bitmap都为空 | 63.52 μs |
-| 2 | 混合情况 | 218.95 μs |
-| 3 | 多数bitmap为空 | 365.31 μs |
-| 4 | 多数bitmap有值 | 953.33 μs |
-| 5 | 所有bitmap都包含所有值 | 967.75 μs |
-| 6 | 范围不同 | 10455.11 μs |
-| 7 | 所有相同数据 | 37728.31 μs |
+## Environment
 
-## 关键发现
+- Java: 21.0.6; VM: OpenJDK 64-Bit Server VM
+- OS/architecture: Mac OS X / aarch64
 
-1. **空bitmap处理最高效**：当所有bitmap都为空时，处理速度最快(61.35 μs)，因为没有实际数据需要处理
+## Results (median; nanoseconds)
 
-2. **数据重叠严重影响性能**：当所有bitmap包含相同数据时，性能最差(39071.32 μs)，这是因为需要处理大量重叠数据，计算复杂度高
+| Scenario | Method | Median ns | Min ns | Max ns | Result IDs | Flat index bytes | Roaring index bytes |
+|---|---|---:|---:|---:|---:|---:|---:|
+| sparse-localized | short_circuit_scan | 123375 | 121292 | 139208 | 5000 | 5000000 | 134120 |
+| sparse-localized | flat_word_and | 32875 | 31792 | 42209 | 5000 | 5000000 | 134120 |
+| sparse-localized | roaring_and | 18625 | 18208 | 26167 | 5000 | 5000000 | 134120 |
+| dense-dispersed | short_circuit_scan | 140625 | 136583 | 163875 | 5000 | 5000000 | 5051264 |
+| dense-dispersed | flat_word_and | 248083 | 238583 | 273584 | 5000 | 5000000 | 5051264 |
+| dense-dispersed | roaring_and | 176083 | 166959 | 219959 | 5000 | 5000000 | 5051264 |
+| dense-more-candidates | short_circuit_scan | 1318625 | 1200375 | 1398042 | 50000 | 5000000 | 5051264 |
+| dense-more-candidates | flat_word_and | 635042 | 531208 | 671292 | 50000 | 5000000 | 5051264 |
+| dense-more-candidates | roaring_and | 1205791 | 1140084 | 1269459 | 50000 | 5000000 | 5051264 |
 
-3. **数据分布显著影响性能**：混合数据分布场景(213.48 μs)的性能表现良好，优于多数bitmap为空(377.94 μs)和多数bitmap有值(922.69 μs)的场景
-
-4. **范围不同的数据影响性能**：范围不同的场景性能较差(10685.60 μs)，说明数据分布的连续性也会影响RoaringBitmap的性能
-
-5. **稀疏数据优于密集数据**：多数bitmap为空的场景(377.94 μs)性能明显优于多数bitmap有值的场景(922.69 μs)
-
-## 结论
-
-RoaringBitmap在处理大规模bitmap的AND操作时表现良好，在大多数场景下能够在毫秒级时间内完成1000个bitmap的AND操作。性能主要受数据重叠程度、数据分布和bitmap是否为空等因素影响。
-
-对于实际应用，建议根据数据特点选择合适的bitmap策略以优化性能。
+Every returned array is checked against expected ascending IDs. Index bytes cover the eight conditions only: fixed-width word payload for flat Bitmap, serialized bytes for Roaring. These are representation sizes, not Java heap measurements.
